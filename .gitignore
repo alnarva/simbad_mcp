@@ -1,0 +1,8 @@
+db/
+whatsapp-auth/db/
+whatsapp-auth/node_modules/
+whatsapp-auth/*.js
+__pycache__/
+*.pyc
+*.pyo
+obscura_src/

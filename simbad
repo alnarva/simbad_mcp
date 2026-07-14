@@ -1,0 +1,304 @@
+#!/bin/bash
+
+# ============================================================
+#  SIMBAD Orchestrator
+#  Starts browsers, DBs, and MCP SSE server.
+#  AI CLIs connect to http://localhost:9861/sse
+#  Ctrl+C or 'exit' shuts everything down.
+# ============================================================
+
+MCP_PORT=9861
+OBSCURA_PORT=9222
+CHROMIUM_PORT=9227
+OLLAMA_PORT=11434
+OLLAMA_LAUNCHED=false
+PROJECT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+CHATS_DB="$PROJECT_DIR/db/simbad_chats.db"
+BROWSER_DB="$PROJECT_DIR/db/simbad_browser.db"
+
+print_banner() {
+    W='\033[97m'; C='\033[36m'; G='\033[90m'; Y='\033[33m'; B='\033[96m'; R='\033[0m'
+    printf '\n'
+    printf '%b' "${W}                             ╱│${R}\n"
+    printf '%b' "${W}                            ╱ │${R}\n"
+    printf '%b' "${W}                           ╱__│${R}\n"
+    printf '%b' "${W}                      ____╱___│____${R}\n"
+    printf '%b' "${W}                      \\___________/${R}\n"
+    printf '%b' "${W}                  ~~~~~~~~~~~~~~~~~~~${R}\n"
+    printf '\n'
+    printf '%b' "${C}   ███████╗██╗███╗   ███╗██████╗  █████╗ ██████╗${R}\n"
+    printf '%b' "${C}   ██╔════╝██║████╗ ████║██╔══██╗██╔══██╗██╔══██╗${R}\n"
+    printf '%b' "${C}   ███████╗██║██╔████╔██║██████╔╝███████║██║  ██║${R}\n"
+    printf '%b' "${C}   ╚════██║██║██║╚██╔╝██║██╔══██╗██╔══██║██║  ██║${R}\n"
+    printf '%b' "${C}   ███████║██║██║ ╚═╝ ██║██████╔╝██║  ██║██████╔╝${R}\n"
+    printf '%b' "${C}   ╚══════╝╚═╝╚═╝     ╚═╝╚═════╝ ╚═╝  ╚═╝╚═════╝ ${R}\n"
+    printf '\n'
+    printf '%b' "${B}            MCP Bridge for AI Agents${R}\n"
+    printf '\n'
+}
+
+wait_for_port() {
+    local port=$1 name=$2
+    printf "  ⏳ Waiting for %s..." "$name"
+    for i in $(seq 1 30); do
+        if nc -z localhost "$port" 2>/dev/null; then
+            printf " ✓\n"
+            return 0
+        fi
+        sleep 1
+    done
+    printf " ✗ (timeout)\n"
+    return 1
+}
+
+# ============================================================
+#  STARTUP
+# ============================================================
+print_banner
+echo "⛵ SIMBAD raising anchor..."
+
+# --- 1. Ollama + Spike (con GPU) ---
+if ! nc -z localhost "$OLLAMA_PORT" 2>/dev/null; then
+    printf "  Starting Ollama (GPU)..."
+    OLLAMA_LAUNCHED=true
+    ollama serve >/dev/null 2>&1 &
+    sleep 2
+    for i in $(seq 1 30); do
+        if nc -z localhost "$OLLAMA_PORT" 2>/dev/null; then
+            printf " ✓\n"
+            break
+        fi
+        sleep 1
+    done
+fi
+
+if nc -z localhost "$OLLAMA_PORT" 2>/dev/null; then
+    echo "  ✓ Ollama ready (GPU: $(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1 || echo 'N/A'))"
+    if ! ollama list 2>/dev/null | grep -q "nomic-embed-text"; then
+        echo "  Pulling nomic-embed-text..."
+        ollama pull nomic-embed-text
+    fi
+    if ! ollama list 2>/dev/null | grep -q "\bspike\b"; then
+        echo "  Creating model 'spike'..."
+        echo "FROM nomic-embed-text" > /tmp/Modelfile_spike
+        ollama create spike -f /tmp/Modelfile_spike >/dev/null 2>&1 || true
+        rm -f /tmp/Modelfile_spike
+    fi
+    echo "  ✓ Spike model ready"
+else
+    echo "  ⚠ Ollama could not start — semantic search disabled"
+fi
+
+# --- 2. Chromium (host) for WhatsApp ---
+echo "  ✓ Obscura engine (port $OBSCURA_PORT) via Docker"
+printf "  Starting Chromium headless on port %s..." "$CHROMIUM_PORT"
+CHROMIUM_PID=""
+CHROMIUM_BIN=""
+for cmd in /usr/bin/chromium chromium chromium-browser; do
+    if command -v "$cmd" &>/dev/null; then
+        CHROMIUM_BIN="$cmd"
+        break
+    fi
+done
+
+if [ -n "$CHROMIUM_BIN" ]; then
+    "$CHROMIUM_BIN" --headless \
+        --remote-debugging-port="$CHROMIUM_PORT" \
+        --no-sandbox --disable-setuid-sandbox \
+        --disable-dev-shm-usage --mute-audio \
+        --disable-gpu --disable-software-rasterizer \
+        --no-first-run --no-default-browser-check --noerrdialogs \
+        --ozone-platform=headless \
+        --ozone-override-screen-size=800,600 \
+        --use-angle=swiftshader-webgl \
+        --disable-sync --disable-breakpad \
+        --disk-cache-size=0 --disable-cache --aggressive-cache-discard \
+        --user-agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36" \
+        --user-data-dir="$PROJECT_DIR/whatsapp-auth/db" \
+        >/dev/null 2>&1 &
+    CHROMIUM_PID=$!
+    sleep 1
+    printf " ✓ (PID %s)\n" "$CHROMIUM_PID"
+else
+    printf " ⚠ Chromium not found — WhatsApp features unavailable\n"
+fi
+
+export CHROMIUM_CDP_URL="http://127.0.0.1:$CHROMIUM_PORT"
+
+mkdir -p "$PROJECT_DIR/db"
+chmod -R 777 "$PROJECT_DIR/db" 2>/dev/null
+
+# Poblar DB Pacífico con historial de CLIs
+if [ -f "$PROJECT_DIR/sync_memories.py" ]; then
+    python3 "$PROJECT_DIR/sync_memories.py" 2>&1 | sed 's/^/    /'
+fi
+
+# --- 4. Docker + Obscura ---
+docker rm -f simbad_run 2>/dev/null || true
+docker run -d --rm --network=host --name simbad_run \
+    -e CHROMIUM_CDP_URL="$CHROMIUM_CDP_URL" \
+    -v "$PROJECT_DIR/db:/app/db" \
+    -v "$PROJECT_DIR/simbad_mcp.py:/app/simbad_mcp.py" \
+    simbad >/dev/null 2>&1
+
+wait_for_port "$OBSCURA_PORT" "Obscura"
+
+# --- 5. MCP SSE Server ---
+echo "  Starting MCP SSE server..."
+docker exec -d simbad_run python /app/simbad_mcp.py \
+    --transport sse --host 127.0.0.1 --port "$MCP_PORT"
+
+wait_for_port "$MCP_PORT" "MCP SSE server"
+echo "  [debug] MCP ready"
+
+# --- 5. Database status ---
+echo ""
+echo "📊 Vector databases:"
+python3 -c "
+import sqlite3, os
+for name, path in [('Pacific (chats)', '$CHATS_DB'), ('Atlantic (browser)', '$BROWSER_DB')]:
+    if os.path.exists(path):
+        conn = sqlite3.connect(path)
+        c = conn.cursor()
+        try:
+            c.execute(\"SELECT COUNT(*) FROM chats_context\")
+            t = c.fetchone()[0]
+        except: t = 0
+        conn.close()
+        print(f'  ✓ {name}: {t} records')
+    else:
+        print(f'  · {name}: empty')
+" 2>/dev/null || echo "  · Databases not yet created"
+
+# ============================================================
+#  READY
+# ============================================================
+echo ""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo " 🚀  SIMBAD BRIDGE ACTIVE"
+echo ""
+echo "   MCP endpoint: http://localhost:$MCP_PORT/sse"
+echo "   Health check: http://localhost:$MCP_PORT/health"
+echo "   Obscura CDP:  http://localhost:$OBSCURA_PORT"
+echo "   Chromium CDP: http://localhost:$CHROMIUM_PORT"
+echo ""
+echo "   AI CLIs can now connect to simbad-bridge"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+
+# ============================================================
+#  INTERACTIVE MODE
+# ============================================================
+cleanup() {
+    echo ""
+    echo "⚓ Simbad returning to harbor..."
+    echo "  Stopping Docker container..."
+    docker stop simbad_run 2>/dev/null || true
+    if [ -n "$CHROMIUM_PID" ]; then
+        echo "  Stopping Chromium..."
+        kill "$CHROMIUM_PID" 2>/dev/null || true
+    fi
+    if [ "$OLLAMA_LAUNCHED" = true ]; then
+        echo "  Stopping Ollama..."
+        kill $(pgrep -f "ollama serve" 2>/dev/null) 2>/dev/null || true
+    fi
+    echo "  Goodbye!"
+}
+
+trap cleanup EXIT
+
+while true; do
+    read -r -p "simbad> " cmd
+    case "$cmd" in
+        exit|quit|q)
+            break
+            ;;
+        status)
+            echo "  Obscura: $(nc -z localhost $OBSCURA_PORT && echo '✓' || echo '✗')"
+            echo "  Chromium: $(nc -z localhost $CHROMIUM_PORT && echo '✓' || echo '✗')"
+            echo "  MCP SSE: $(nc -z localhost $MCP_PORT && echo '✓' || echo '✗')"
+            echo "  Databases: chats=$([ -f $CHATS_DB ] && echo $(sqlite3 $CHATS_DB 'SELECT COUNT(*) FROM chats_context' 2>/dev/null || echo 0) || echo 0), browser=$([ -f $BROWSER_DB ] && echo $(sqlite3 $BROWSER_DB 'SELECT COUNT(*) FROM web_context' 2>/dev/null || echo 0) || echo 0)"
+            ;;
+        mcp)
+            echo "  http://localhost:$MCP_PORT/sse"
+            echo "  $(curl -s http://localhost:$MCP_PORT/health 2>/dev/null || echo 'Not responding')"
+            ;;
+        whatsapp)
+            echo "📱 Reading WhatsApp..."
+            docker exec -i simbad_run python3 << 'PYEOF'
+import anyio, sys
+from playwright.async_api import async_playwright
+from PIL import Image
+import io
+
+async def main():
+    async with async_playwright() as p:
+        browser = await p.chromium.connect_over_cdp("http://127.0.0.1:9227")
+        context = browser.contexts[0] if browser.contexts else await browser.new_context()
+        pages = context.pages
+        page = None
+        for pg in pages:
+            if "web.whatsapp.com" in pg.url:
+                page = pg
+                break
+        if not page:
+            page = await context.new_page()
+            await page.goto("https://web.whatsapp.com")
+            await page.wait_for_timeout(5000)
+        
+        has_side = await page.query_selector('#pane-side')
+        if has_side:
+            print("✅ Ya hay sesión activa en WhatsApp")
+        else:
+            # Esperar a que el QR se genere y extraer data-ref
+            try:
+                await page.wait_for_selector('div[data-ref]', timeout=15000)
+            except:
+                pass
+            qr_data = await page.evaluate('() => { const e = document.querySelector("div[data-ref]"); return e ? e.getAttribute("data-ref") : null }')
+            if qr_data:
+                import qrcode, io as _io
+                qr = qrcode.QRCode(border=2)
+                qr.add_data(qr_data)
+                buf = _io.StringIO()
+                qr.print_ascii(out=buf, invert=True)
+                print(buf.getvalue())
+                print("📱 Escanea el código QR con tu teléfono")
+            else:
+                # Fallback: screenshot
+                canvas = await page.query_selector("canvas")
+                if canvas:
+                    shot = await canvas.screenshot()
+                    img = Image.open(_io.BytesIO(shot)).convert('1')
+                    tw = 64
+                    img = img.resize((tw, int(tw * img.height / img.width)), Image.NEAREST)
+                    for y in range(0, img.height, 2):
+                        line = ""
+                        for x in range(img.width):
+                            t = img.getpixel((x, y)) == 0
+                            b = img.getpixel((x, min(y+1, img.height-1))) == 0
+                            line += "█" if t and b else "▀" if t else "▄" if b else " "
+                        print(line)
+                    print("📱 Escanea el código QR con tu teléfono")
+                else:
+                    text = await page.inner_text('body')
+                    print(text[:500])
+
+anyio.run(main)
+PYEOF
+            ;;
+        help|h)
+            echo "  exit|quit   Shut down everything"
+            echo "  status      Show service status"
+            echo "  mcp         Show MCP server info"
+            echo "  whatsapp    Read WhatsApp messages"
+            echo "  help        This message"
+            ;;
+        "")
+            continue
+            ;;
+        *)
+            echo "  Unknown command. Type 'help'."
+            ;;
+    esac
+done
