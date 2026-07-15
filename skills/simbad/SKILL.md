@@ -1,7 +1,7 @@
 ---
 name: simbad-mcp
 description: >
-  Complete reference for the Simbad MCP server — 17 tools for WhatsApp, LinkedIn, web scraping, semantic memory, and browser automation via Obscura/Chromium.
+  Simbad is the internet gateway for AI agents — an MCP server that pilots two browser engines (Obscura stealth + Chromium) to give LLMs eyes, hands, and memory on the web. Navega, busca, scrollea, chatea por WhatsApp Business, publica en LinkedIn, extrae páginas, y recuerda todo en dos bases semánticas (Atlántico + Pacífico) vía Spike embeddings. 17 tools todo-en-uno.
 ---
 
 # Simbad MCP Server — Skill Reference

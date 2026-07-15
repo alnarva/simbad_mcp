@@ -1,122 +1,74 @@
-# ⛵ MCP_SIMBAD
+# Simbad MCP Server 🌐🤖
 
-Simbad es un motor de navegación, scraping y automatización web sigiloso diseñado para ser ultra eficiente en tokens e integrarse como servidor **MCP (Model Context Protocol)** en herramientas de Inteligencia Artificial (IDEs, CLI, etc.).
+**El puente entre tu agente IA e internet.**
 
-Funciona interactuando de forma híbrida (simulación humana a nivel de DOM y teclado Playwright nativo) con navegadores abiertos con puertos de depuración activa, garantizando que tu cursor y foco del sistema permanezcan intactos.
+Simbad es un servidor MCP (Model Context Protocol) que convierte a cualquier LLM en un agente con capacidad de navegar, buscar, chatear, publicar y recordar — todo desde el navegador.
 
-## 🧠 The Ocean Brain Architecture
+## ¿Qué hace?
 
-Simbad utilizes two powerful engines running entirely in **Headless Mode** (sin interfaz gráfica) to avoid interrupting your workflow:
-1. **Agile Engine (Obscura - Port 9222):** A lightweight Rust-based headless browser used for stealth web scraping and research.
-2. **Heavy Engine (Chromium Headless - Port 9227):** A persistent Chromium instance (perfil aislado, no tu Chrome personal) para WhatsApp Web.
+Imagina un asistente que pueda:
 
-### 📱 Escaneando el QR de WhatsApp (Headless)
-Si WhatsApp requiere reconexión, el comando `whatsapp` en el prompt `simbad>` captura el QR desde Chromium y lo renderiza como ASCII directamente en la terminal. Escanea el código con tu teléfono desde WhatsApp → Menú → WhatsApp Web.
+- **Chatear por WhatsApp Business** — leer mensajes, buscar contactos, responder conversaciones
+- **Publicar en LinkedIn** — escribir posts, comentar en tu feed, interactuar con tu red
+- **Navegar la web** — buscar en DuckDuckGo, leer páginas, extraer contenido limpio (sin ads ni scripts)
+- **Recordar** — dos memorias semánticas persistentes:
+  - 🐋 **Pacífico** — recuerda conversaciones pasadas, decisiones de proyecto, historial de CLIs
+  - 🌊 **Atlántico** — recuerda documentación web, páginas visitadas, resultados de búsqueda
+- **Preguntarle a ChatGPT** — enviar prompts directamente a ChatGPT y obtener respuestas
+- **Automatizar el navegador** — scroll, esperar elementos, sincronizar contenido, diagnosticar errores
 
----
+## ¿Cómo funciona?
 
-## 🚀 Características Principales
+Simbad pilotea **dos motores de navegador** en paralelo:
 
-* **Interacción Híbrida Sigilosa:** Envía mensajes en WhatsApp Web y ChatGPT sin activar las ventanas ni secuestrar el puntero del mouse del host (ideal para entornos con gestores de ventanas como Hyprland).
-* **Eficiencia de Tokens Extrema (`--site read`):** Extrae páginas web y limpia el DOM eliminando scripts, estilos, cabeceras, pies de página, barras laterales y publicidad, reduciendo el consumo de tokens en un **90%**.
-* **Caché Semántica Local (Smart Query):** Guarda los historiales de navegación y búsquedas vectorizados en una base de datos SQLite efímera, permitiendo responder consultas localmente (usando modelos de Ollama) sin consumir internet ni tokens de APIs.
-* **Base de Datos Efímera por Sesión:** La base de datos vectorial se inicializa al encender y se purga al 100% al apagar para garantizar privacidad absoluta y 0 bytes ocupados en disco.
-* **Instalador Autogestionado:** Configura todo el entorno de forma portable en cualquier máquina Linux con un solo comando.
+| Motor | Puerto | Para qué |
+|-------|--------|----------|
+| **Obscura** 🕵️ | `:9222` | Modo stealth. LinkedIn, scraping, búsquedas web, ChatGPT. Corre en Docker. |
+| **Chromium** 🧭 | `:9227` | Chrome headless real en el host. Exclusivo para WhatsApp Business. |
 
----
+Ambos se orquestan desde un solo servidor MCP SSE en `http://localhost:9861/sse`.
 
-## 🛠️ Requisitos del Sistema
+## Memoria dual con Spike
 
-* **Docker**
-* **Ollama** (para la generación local de embeddings con `nomic-embed-text`)
-* Chromium instalado en el sistema
-  ```bash
-  chromium --remote-debugging-port=9222
-  ```
+Simbad usa **Spike** (Ollama + `nomic-embed-text`) para generar embeddings y guardar todo en SQLite con WAL mode:
 
----
+- `simbad_browser.db` → **Atlántico**: conocimiento web (docs, páginas, búsquedas)
+- `simbad_chats.db` → **Pacífico**: contexto conversacional (chats, decisiones, CLI logs)
 
-## 📦 Instalación
+GPU (NVIDIA) si está disponible, CPU si no.
 
-Para instalar o portar Simbad a cualquier máquina Linux:
+## 17 herramientas MCP
 
-1. Clona este repositorio.
-2. Entra en el directorio del proyecto y corre el instalador:
-   ```bash
-   cd MCP_SIMBAD/
-   ./install.sh
-   ```
+| Herramienta | Descripción |
+|-------------|-------------|
+| `set_browser_engine` | Cambia entre Obscura y Chromium |
+| `read_whatsapp_messages` | Lee mensajes de WhatsApp Business |
+| `send_whatsapp_message` | Envía mensajes por WhatsApp |
+| `get_feed_posts` | Escanea feed de LinkedIn |
+| `comment_on_post` | Comenta en LinkedIn |
+| `publish_linkedin_post` | Publica post en LinkedIn |
+| `search_web` | Busca en DuckDuckGo |
+| `read_webpage` | Extrae contenido de una URL |
+| `ask_chatgpt` | Consulta a ChatGPT |
+| `search_browser_history` | Busca en Atlántico (memoria web) |
+| `search_chat_history` | Busca en Pacífico (memoria conversacional) |
+| `semantic_search` | Búsqueda semántica en memoria del navegador |
+| `scroll_page` | Desplaza la página activa |
+| `sync_page_content` | Indexa contenido visible en Atlántico |
+| `get_browser_logs` | Diagnostica errores del navegador |
+| `wait_for_condition` | Espera a que aparezca un elemento |
+| `open_in_browser` | Abre URL en nueva pestaña |
 
-El instalador verificará las dependencias, compilará la imagen Docker y creará un enlace simbólico en tu terminal para que puedas llamar a `simbad` de forma global.
+## stack
 
----
-
-## 🧭 Guía de Uso
-
-Simbad cuenta con varios modos de navegación y consulta:
-
-### 1. Consulta Inteligente (Modo por Defecto)
-Resuelve preguntas conceptuales. Busca en la memoria semántica local primero (usando Ollama); si no tiene el contexto, consulta a ChatGPT, te da la respuesta y la indexa localmente:
-```bash
-simbad "Tu pregunta o instrucción"
+```
+🧠 Ollama/Spike (embeddings)
+🌐 Obscura (stealth browser, Docker)
+🌐 Chromium (WhatsApp host)
+🗄️ SQLite WAL (memoria dual)
+🔌 FastMCP (SSE server)
 ```
 
-### 2. Extracción Limpia de Páginas Web
-Navega a una URL, limpia el código fuente y extrae el texto puro y libre de basura:
-```bash
-simbad --site read "https://news.ycombinator.com"
-```
+## Origen del nombre
 
-### 3. Búsqueda Web Estructurada
-Busca en DuckDuckGo y devuelve títulos, fragmentos y enlaces ligeros:
-```bash
-simbad --site search "clima actual en Santiago de Chile"
-```
-
-### 4. Búsqueda Semántica Local
-Busca conceptos en toda la base de datos de tu sesión actual usando similitud de coseno vectorial:
-```bash
-simbad --site semsearch "conceptos clave sobre automatización"
-```
-
-### 5. WhatsApp Web
-Envía mensajes de forma sigilosa sin interrumpir tu navegación diaria:
-```bash
-simbad --site whatsapp "Yesica Acuña" "Mensaje de prueba automático de Simbad"
-```
-
----
-
-## 🏛️ Arquitectura del Entorno
-
-```mermaid
-graph LR
-    User([Usuario]) -->|CLI: simbad| Orchestrator[Orquestador Host]
-    Orchestrator -->|1. Activa| Bridge[Obscura: Debug Port 9222]
-    Orchestrator -->|2. Inicia| Ollama[Ollama: Embed Model 11434]
-    Orchestrator -->|3. Monta y Corre| Container[Contenedor Docker: Simbad Engine]
-    Container -->|Escribe / Consulta| SQLite[(SQLite: simbad_context.db)]
-    Container -->|Playwright CDP| Bridge
-    Container -->|API Embeddings| Ollama
-```
-
----
-
-## 📂 Estructura del Proyecto
-
-* **`simbad`**: Shell script orquestador y lanzador.
-* **`sync_memories.py`**: Sincroniza historial de CLIs (OpenCode, Claude Code, Antigravity) en la base Pacífico.
-* **`simbad_mcp.py`**: Adaptador para exponer a Simbad como servidor MCP (Model Context Protocol).
-* **`Dockerfile`**: Definición del contenedor de ejecución aislado.
-* **`install.sh`**: Script instalador autogestionado.
-* **`db/`**: Carpeta temporal montada donde reside la base de datos de la sesión.
-
----
-
-## 📞 Soporte y Contacto
-
-Si tienes preguntas, sugerencias o necesitas soporte con Simbad, puedes contactar al desarrollador:
-
-* **GitHub:** [alnarva](https://github.com/alnarva)
-* **Correo Electrónico:** alfredo.narvaez.pinedo@gmail.com
-
+Simbad — como el marino de *Las mil y una noches* — navega entre dos mundos: el digital (browsers, APIs, memoria) y el del agente (LLM, decisiones, acciones). Es el vehículo que lleva la inteligencia artificial a explorar internet.
