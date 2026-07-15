@@ -27,8 +27,11 @@ def get_ollama_embedding(text):
 
 def init_db():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=30)
     cursor = conn.cursor()
+    # WAL mode: allows concurrent readers while writing
+    cursor.execute("PRAGMA journal_mode=WAL")
+    cursor.execute("PRAGMA synchronous=NORMAL")
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS chats_context (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -66,7 +69,7 @@ def sync_claude_code():
         return
         
     print("  Syncing Claude Code history...")
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=30)
     cursor = conn.cursor()
     added_count = 0
     
@@ -102,7 +105,7 @@ def sync_antigravity():
         return
         
     print("  Syncing Antigravity CLI transcripts...")
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=30)
     cursor = conn.cursor()
     added_count = 0
     
@@ -120,7 +123,10 @@ def sync_antigravity():
             
         try:
             with open(filepath, "r", encoding="utf-8") as f:
-                for line in f:
+                lines = f.readlines()
+            # Limitar a las últimas 500 líneas para no bloquear en archivos enormes
+            lines = lines[-500:]
+            for line in lines:
                     if not line.strip():
                         continue
                     try:
@@ -156,7 +162,7 @@ def sync_opencode():
         return
         
     print("  Syncing OpenCode history...")
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=30)
     cursor = conn.cursor()
     added_count = 0
     

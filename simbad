@@ -15,6 +15,7 @@ OLLAMA_LAUNCHED=false
 PROJECT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 CHATS_DB="$PROJECT_DIR/db/simbad_chats.db"
 BROWSER_DB="$PROJECT_DIR/db/simbad_browser.db"
+SIMBAD_PID_FILE="/tmp/simbad.pid"
 
 print_banner() {
     W='\033[97m'; C='\033[36m'; G='\033[90m'; Y='\033[33m'; B='\033[96m'; R='\033[0m'
@@ -52,9 +53,45 @@ wait_for_port() {
 }
 
 # ============================================================
+#  SINGLE-INSTANCE ENFORCEMENT
+#  Si hay una instancia previa corriendo, se cierra antes de
+#  iniciar esta nueva.
+# ============================================================
+enforce_singleton() {
+    if [ -f "$SIMBAD_PID_FILE" ]; then
+        local old_pid
+        old_pid=$(cat "$SIMBAD_PID_FILE" 2>/dev/null)
+        if [ -n "$old_pid" ] && kill -0 "$old_pid" 2>/dev/null; then
+            echo "⚠  Instancia previa detectada (PID $old_pid) — cerrándola..."
+            # Detener el contenedor Docker de la instancia anterior
+            docker stop simbad_run 2>/dev/null || true
+            # Matar el grupo de procesos completo (Chromium, subshells, etc.)
+            kill -- -"$old_pid" 2>/dev/null || kill "$old_pid" 2>/dev/null || true
+            # Esperar hasta 5s a que muera
+            local waited=0
+            while kill -0 "$old_pid" 2>/dev/null && [ $waited -lt 5 ]; do
+                sleep 1
+                waited=$((waited + 1))
+            done
+            # Si sigue vivo, SIGKILL
+            kill -9 -- -"$old_pid" 2>/dev/null || kill -9 "$old_pid" 2>/dev/null || true
+            echo "  ✓ Instancia anterior cerrada"
+        else
+            echo "  · PID file obsoleto ($old_pid ya no existe) — ignorando"
+        fi
+        rm -f "$SIMBAD_PID_FILE"
+    fi
+    # Matar cualquier sync_memories.py huérfano de corridas anteriores
+    pkill -f "sync_memories.py" 2>/dev/null || true
+    # Registrar esta instancia
+    echo $$ > "$SIMBAD_PID_FILE"
+}
+
+# ============================================================
 #  STARTUP
 # ============================================================
 print_banner
+enforce_singleton
 echo "⛵ SIMBAD raising anchor..."
 
 # --- 1. Ollama + Spike (con GPU) ---
@@ -94,23 +131,40 @@ echo "  ✓ Obscura engine (port $OBSCURA_PORT) via Docker"
 printf "  Starting Chromium headless on port %s..." "$CHROMIUM_PORT"
 CHROMIUM_PID=""
 CHROMIUM_BIN=""
-for cmd in /usr/bin/chromium chromium chromium-browser; do
-    if command -v "$cmd" &>/dev/null; then
-        CHROMIUM_BIN="$cmd"
+# Buscar Chromium: primero rutas absolutas conocidas, luego PATH
+for cmd in /usr/bin/chromium /usr/bin/chromium-browser /usr/bin/google-chrome chromium chromium-browser google-chrome; do
+    if [ -x "$cmd" ] 2>/dev/null || command -v "$cmd" &>/dev/null; then
+        # Resolver ruta absoluta si es un nombre sin ruta
+        if [ -x "$cmd" ]; then
+            CHROMIUM_BIN="$cmd"
+        else
+            CHROMIUM_BIN="$(command -v "$cmd")"
+        fi
         break
     fi
 done
+
+# Detectar si hay GPU disponible para elegir flags de renderizado
+GPU_FLAGS=""
+if nvidia-smi &>/dev/null || ls /dev/dri/renderD* &>/dev/null 2>&1; then
+    # GPU disponible: activar aceleración por hardware
+    GPU_FLAGS="--enable-gpu-rasterization --enable-zero-copy"
+    printf " (GPU: %s)" "$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1 || echo 'dri')"
+else
+    # Sin GPU: usar SwiftShader software rasterizer
+    GPU_FLAGS="--disable-gpu --disable-software-rasterizer --use-angle=swiftshader-webgl"
+    printf " (CPU/SwiftShader)"
+fi
 
 if [ -n "$CHROMIUM_BIN" ]; then
     "$CHROMIUM_BIN" --headless \
         --remote-debugging-port="$CHROMIUM_PORT" \
         --no-sandbox --disable-setuid-sandbox \
         --disable-dev-shm-usage --mute-audio \
-        --disable-gpu --disable-software-rasterizer \
+        $GPU_FLAGS \
         --no-first-run --no-default-browser-check --noerrdialogs \
         --ozone-platform=headless \
         --ozone-override-screen-size=800,600 \
-        --use-angle=swiftshader-webgl \
         --disable-sync --disable-breakpad \
         --disk-cache-size=0 --disable-cache --aggressive-cache-discard \
         --user-agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36" \
@@ -130,7 +184,7 @@ chmod -R 777 "$PROJECT_DIR/db" 2>/dev/null
 
 # Poblar DB Pacífico con historial de CLIs
 if [ -f "$PROJECT_DIR/sync_memories.py" ]; then
-    python3 "$PROJECT_DIR/sync_memories.py" 2>&1 | sed 's/^/    /'
+    timeout 90 python3 "$PROJECT_DIR/sync_memories.py" 2>&1 | sed 's/^/    /' || echo "    ⚠ sync_memories expiró o falló (no crítico)"
 fi
 
 # --- 4. Docker + Obscura ---
@@ -156,18 +210,25 @@ echo ""
 echo "📊 Vector databases:"
 python3 -c "
 import sqlite3, os
-for name, path in [('Pacific (chats)', '$CHATS_DB'), ('Atlantic (browser)', '$BROWSER_DB')]:
+dbs = [
+    ('Pacífico (chats)',   '$CHATS_DB',   'chats_context'),
+    ('Atlántico (browser)','$BROWSER_DB', 'web_context'),
+]
+for name, path, table in dbs:
     if os.path.exists(path):
         conn = sqlite3.connect(path)
         c = conn.cursor()
         try:
-            c.execute(\"SELECT COUNT(*) FROM chats_context\")
-            t = c.fetchone()[0]
-        except: t = 0
+            c.execute(f'SELECT COUNT(*) FROM {table}')
+            total = c.fetchone()[0]
+            c.execute(f'SELECT COUNT(*) FROM {table} WHERE embedding IS NOT NULL')
+            emb = c.fetchone()[0]
+            print(f'  ✓ {name}: {total} registros ({emb} con embeddings)')
+        except Exception as e:
+            print(f'  ⚠ {name}: BD existe pero tabla no encontrada ({e})')
         conn.close()
-        print(f'  ✓ {name}: {t} records')
     else:
-        print(f'  · {name}: empty')
+        print(f'  · {name}: no existe aún')
 " 2>/dev/null || echo "  · Databases not yet created"
 
 # ============================================================
@@ -202,6 +263,8 @@ cleanup() {
         echo "  Stopping Ollama..."
         kill $(pgrep -f "ollama serve" 2>/dev/null) 2>/dev/null || true
     fi
+    # Limpiar PID file
+    rm -f "$SIMBAD_PID_FILE"
     echo "  Goodbye!"
 }
 

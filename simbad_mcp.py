@@ -469,6 +469,15 @@ def save_page_context(url, title, content):
 
 mcp = FastMCP("Simbad")
 
+# Patch: make the server stateless so OpenCode can call tools immediately
+# without requiring explicit initialize request after reconnection
+_orig_run = mcp._mcp_server.run
+async def _patched_run(read_stream, write_stream, initialization_options,
+                       raise_exceptions=False, stateless=False):
+    await _orig_run(read_stream, write_stream, initialization_options,
+                    raise_exceptions=raise_exceptions, stateless=True)
+mcp._mcp_server.run = _patched_run
+
 CURRENT_ENGINE = "obscura"
 
 def get_cdp_url():
@@ -620,54 +629,49 @@ async def run_whatsapp(context, contact, message):
         return qr_bytes
 
     try:
-        # Wait for search box to be visible
-        search_selector = 'input[aria-label="Buscar un chat o iniciar uno nuevo"], input[aria-label="Search or start new chat"], div[title="Buscar un chat o iniciar uno nuevo"], p.selectable-text, div[contenteditable="true"]'
-        search_box = await page.wait_for_selector(search_selector, timeout=20000)
-            
-        # Focus and clear the search box
-        await search_box.focus()
-        await search_box.fill("")
-        
-        # Use our randomized human_type helper to simulate realistic keystrokes and avoid detection
-        await human_type(search_box, contact)
+        # Press Escape first in case a chat is already open
+        await page.keyboard.press("Escape")
+        await asyncio.sleep(0.5)
+
+        # Search for the contact
+        search_box = page.locator('[role="textbox"]').first
+        await search_box.click()
+        await page.keyboard.press("Control+A")
+        await page.keyboard.press("Backspace")
+        await asyncio.sleep(0.3)
+        await search_box.fill(contact)
         await asyncio.sleep(2)
         
-        # Restrict contact selection to the sidebar panel
-        clicked = False
-        sidebar_selectors = ['#pane-side', '[data-testid="chat-list"]', 'div[role="grid"]']
-        sidebar = None
-        for sel in sidebar_selectors:
-            try:
-                sidebar = await page.wait_for_selector(sel, timeout=2000)
-                if sidebar:
-                    break
-            except Exception:
-                continue
-                
-        if sidebar:
-            try:
-                contact_selector = f'span[title="{contact}"]'
-                contact_tile = await sidebar.wait_for_selector(contact_selector, timeout=3000)
-                # Use DOM-level simulated mouse click to prevent OS mouse warping
-                await contact_tile.evaluate(js_click)
-                clicked = True
-            except Exception:
-                try:
-                    contact_tile = await sidebar.locator('span').filter(has_text=contact).first
-                    await contact_tile.evaluate(js_click)
-                    clicked = True
-                except Exception:
-                    try:
-                        # Fallback to the first search result in the sidebar list
-                        first_chat = await sidebar.locator('div[role="row"], [data-testid="list-item"], ._ak72, ._ak73').first
-                        await first_chat.evaluate(js_click)
-                        clicked = True
-                    except Exception as e:
-                        print(f"Could not click first search result: {e}")
-                        
+        # Click the first matching contact in the sidebar
+        clicked = await page.evaluate("""(contactName) => {
+            const rows = document.querySelectorAll('#pane-side div[role="row"]');
+            for (const row of rows) {
+                const text = row.innerText.toLowerCase();
+                if (text.includes(contactName.toLowerCase())) {
+                    const cell = row.querySelector('[role="gridcell"]');
+                    if (cell) {
+                        cell.click();
+                        return true;
+                    }
+                    row.click();
+                    return true;
+                }
+            }
+            if (rows.length > 0) {
+                const cell = rows[0].querySelector('[role="gridcell"]');
+                if (cell) cell.click();
+                else rows[0].click();
+                return 'fallback';
+            }
+            return false;
+        }""", contact)
         if not clicked:
-            # Press Enter at element level
             await search_box.press("Enter")
+        
+        await asyncio.sleep(1)
+        # Press Enter to open the conversation (needed for WhatsApp Business)
+        await page.keyboard.press("Enter")
+        await asyncio.sleep(2)
             
         await asyncio.sleep(2)
         
@@ -1982,8 +1986,12 @@ async def run_read_whatsapp_contact_chat(context, contact: str, limit: int = 15)
         return "Error: Could not find chat list. WhatsApp might still be loading."
 
     try:
-        # ── 1. SEARCH CONTACT ──
-        # Use a universal selector that works on both WhatsApp Web and Business
+        # ── 1. GO BACK TO MAIN CHAT LIST ──
+        # Press Escape to close any open conversation/panel first
+        await page.keyboard.press("Escape")
+        await asyncio.sleep(0.5)
+
+        # ── 2. SEARCH CONTACT ──
         search_box = page.locator('[role="textbox"]').first
         await search_box.click()
         await page.keyboard.press("Control+A")
@@ -1992,32 +2000,38 @@ async def run_read_whatsapp_contact_chat(context, contact: str, limit: int = 15)
         await search_box.fill(contact)
         await asyncio.sleep(2)
 
-        # ── 2. CLICK FIRST RESULT ──
+        # ── 3. CLICK FIRST RESULT + ENTER ──
         clicked = await page.evaluate("""(contactName) => {
             const rows = document.querySelectorAll('#pane-side div[role="row"]');
-            // Try exact match first, then partial
             for (const row of rows) {
                 const text = row.innerText.toLowerCase();
                 if (text.includes(contactName.toLowerCase())) {
-                    const rect = row.getBoundingClientRect();
-                    row.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true,
-                        clientX: rect.left + 10, clientY: rect.top + 10}));
+                    const cell = row.querySelector('[role="gridcell"]');
+                    if (cell) {
+                        cell.click();
+                        return true;
+                    }
+                    row.click();
                     return true;
                 }
             }
-            // Fallback: click first row
             if (rows.length > 0) {
-                rows[0].dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}));
+                const cell = rows[0].querySelector('[role="gridcell"]');
+                if (cell) cell.click();
+                else rows[0].click();
                 return 'fallback';
             }
             return false;
         }""", contact)
         if not clicked:
             await search_box.press("Enter")
+        await asyncio.sleep(1)
+
+        # Try pressing Enter again to open the conversation (WhatsApp Business)
+        await page.keyboard.press("Enter")
         await asyncio.sleep(2)
 
-        # ── 3. VERIFY WITH SPIKE ──
-        # Find the open chat title without relying on #main
+        # ── 4. VERIFY WITH SPIKE ──
         actual_chat_title = await page.evaluate("""() => {
             const spans = document.querySelectorAll('span[dir="auto"]');
             const exclude = ['Chats', 'Buscar un chat o iniciar uno nuevo', 'Search or start new chat',
@@ -2038,54 +2052,101 @@ async def run_read_whatsapp_contact_chat(context, contact: str, limit: int = 15)
                     return (f"⚠️ Security abort: Chat opened ('{actual_chat_title}') does not match "
                             f"requested contact ('{contact}'). Spike similarity: {similarity:.2f}")
 
-        # ── 4. EXTRACT MESSAGES ──
-        await asyncio.sleep(2)
+        # ── 5. EXTRACT MESSAGES ──
+        await asyncio.sleep(1)
+
         messages_data = await page.evaluate("""(limit) => {
-            // Find the container with most [data-testid*="msg"] children
-            const allDivs = document.querySelectorAll('div');
-            let bestContainer = null, bestCount = 0;
-            allDivs.forEach(d => {
-                const count = d.querySelectorAll('[data-testid*="msg"]').length;
-                if (count > bestCount) { bestCount = count; bestContainer = d; }
-            });
-            if (!bestContainer || bestCount === 0) return [];
+            const panel = document.querySelector('[data-testid="conversation-panel-messages"]');
+            if (!panel) return [];
 
-            const msgEls = bestContainer.querySelectorAll('[data-testid*="msg"]');
             const results = [];
-            msgEls.forEach(el => {
-                const html = el.outerHTML;
-                const text = el.innerText.trim();
-                if (!text || text.length < 2) return;
 
-                // Determine direction: outgoing messages usually have different data-testid or CSS
-                const isOutgoing = html.includes('message-out') || html.includes('msg-outgoing')
-                    || el.closest('[data-testid*="outgoing"]') !== null
-                    || (el.getAttribute('data-testid') || '').includes('outgoing');
+            // ── Método 1: data-pre-plain-text ──────────────────────────────────────
+            // Atributo confiable: '[HH:MM, DD/MM/YYYY] Nombre:'
+            // Presente en todos los mensajes de texto, no depende de clases CSS.
+            const copyableTexts = panel.querySelectorAll('[data-pre-plain-text]');
+            if (copyableTexts.length > 0) {
+                // Obtener el nombre del contacto del header (quien NO somos nosotros)
+                const headerSpan = document.querySelector('#main header span[dir="auto"]');
+                const contactName = headerSpan ? headerSpan.innerText.trim().toLowerCase() : null;
 
-                results.push({
-                    text: text,
-                    isOutgoing: isOutgoing
+                copyableTexts.forEach(el => {
+                    const prePlain = el.getAttribute('data-pre-plain-text') || '';
+                    // Formato: '[HH:MM, DD/MM/YYYY] Nombre:'  o  '[HH:MM] Nombre:'
+                    const senderMatch = prePlain.match(/]\\s*(.+?):\\s*$/);
+
+                    const senderRaw = senderMatch ? senderMatch[1].trim() : null;
+
+                    // Buscar el texto del mensaje en el nodo hermano o hijo
+                    const textEl = el.querySelector('.copyable-text, span[class*="selectable-text"]') || el;
+                    const text = textEl.innerText.trim();
+                    if (!text || text.length < 1) return;
+
+                    let isOutgoing = false;
+                    if (senderRaw && contactName) {
+                        // Si el remitente NO es el contacto → es outgoing (lo enviamos nosotros)
+                        isOutgoing = !senderRaw.toLowerCase().includes(contactName);
+                    }
+
+                    results.push({ text, isOutgoing, sender: senderRaw });
                 });
+            }
+
+            // ── Método 2: Fallback por clases CSS legacy ───────────────────────────
+            // Solo si data-pre-plain-text no funcionó (grupos sin ese atributo, etc.)
+            if (results.length === 0) {
+                const containers = panel.querySelectorAll('.msg-container, [data-testid^="conv-msg-"]');
+                containers.forEach(el => {
+                    const text = el.innerText.trim();
+                    if (!text || text.length < 2) return;
+                    const html = el.outerHTML;
+                    const isOutgoing = html.includes('tail-out') && !html.includes('tail-in');
+                    results.push({ text, isOutgoing, sender: null });
+                });
+            }
+
+            // ── Método 3: Fallback geométrico ─────────────────────────────────────
+            // Si no hay clases ni atributos: mensajes que empiezan en >40% del ancho
+            // son outgoing (burbuja derecha), el resto son incoming (burbuja izquierda).
+            if (results.length === 0) {
+                const allMsgs = panel.querySelectorAll('[role="row"]');
+                const panelWidth = panel.getBoundingClientRect().width || window.innerWidth;
+                allMsgs.forEach(el => {
+                    const text = el.innerText.trim();
+                    if (!text || text.length < 2) return;
+                    const rect = el.getBoundingClientRect();
+                    const isOutgoing = rect.left > panelWidth * 0.40;
+                    results.push({ text, isOutgoing, sender: null });
+                });
+            }
+
+            // Deduplicar y limitar
+            const seen = new Set();
+            const unique = results.filter(m => {
+                if (seen.has(m.text)) return false;
+                seen.add(m.text);
+                return true;
             });
-            return results.slice(-limit);
+
+            return unique.slice(-limit);
         }""", limit)
 
         if not messages_data:
             html_preview = await page.evaluate("document.body.innerText.slice(0, 500)")
-            return f"No messages found in chat with {actual_chat_title}. Page preview: {html_preview}"
+            return f"No messages found in chat with {actual_chat_title}. Whatsapp Business preview: {html_preview}"
+
+        messages_list = messages_data
 
         # Format the output
         result_lines = [f"--- Chat history with {actual_chat_title} ---"]
-        for msg in messages_data:
+        for msg in messages_list:
             sender = "You" if msg['isOutgoing'] else actual_chat_title
-            # Clean up the text
             clean_text = " | ".join(
                 line.strip() for line in msg['text'].split('\n') if line.strip()
             )
             result_lines.append(f"{sender}: {clean_text}")
 
         chat_text = "\n".join(result_lines)
-        # Save with Spike for future semantic queries
         save_page_context(page.url, f"WhatsApp Chat History with {actual_chat_title}", chat_text)
         return chat_text
 
