@@ -37,7 +37,7 @@ Simbad usa **Spike** (Ollama + `nomic-embed-text`) para generar embeddings y gua
 
 GPU (NVIDIA) si está disponible, CPU si no.
 
-## 17 herramientas MCP
+## 20 herramientas MCP
 
 | Herramienta | Descripción |
 |-------------|-------------|
@@ -47,6 +47,11 @@ GPU (NVIDIA) si está disponible, CPU si no.
 | `get_feed_posts` | Escanea feed de LinkedIn |
 | `comment_on_post` | Comenta en LinkedIn |
 | `publish_linkedin_post` | Publica post en LinkedIn |
+| `list_linkedin_conversations` | Lista las conversaciones del chat de LinkedIn |
+| `read_linkedin_messages` | Lee los mensajes de un chat de LinkedIn |
+| `send_linkedin_message` | Envía un mensaje de chat a un contacto o perfil de LinkedIn |
+| `send_linkedin_connection_requests` | Envía solicitudes de conexión a perfiles sugeridos ("Gente que podrías conocer") |
+| `send_linkedin_profile_connection` | Envía solicitud de conexión a un perfil específico de LinkedIn (con o sin nota) |
 | `search_web` | Busca en DuckDuckGo |
 | `read_webpage` | Extrae contenido de una URL |
 | `ask_chatgpt` | Consulta a ChatGPT |

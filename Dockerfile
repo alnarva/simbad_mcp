@@ -31,7 +31,7 @@ RUN mkdir -p /app/bin && \
 # ============================================================
 # 4. Copiar código de Simbad y entrypoint
 # ============================================================
-COPY simbad_mcp.py entrypoint.sh ./
+COPY simbad_mcp.py entrypoint.sh clickup.py linkedin_chats.py ./
 
 # ============================================================
 # 5. Entrypoint: arranca Obscura como daemon, luego Simbad MCP

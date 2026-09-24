@@ -157,6 +157,13 @@ else
 fi
 
 if [ -n "$CHROMIUM_BIN" ]; then
+    # Limpiar sesiones anteriores para evitar restaurar pestañas duplicadas
+    rm -rf "$PROJECT_DIR/whatsapp-auth/db/Default/Sessions"
+    rm -f "$PROJECT_DIR/whatsapp-auth/db/Default/Current Session"
+    rm -f "$PROJECT_DIR/whatsapp-auth/db/Default/Current Tabs"
+    rm -f "$PROJECT_DIR/whatsapp-auth/db/Default/Last Session"
+    rm -f "$PROJECT_DIR/whatsapp-auth/db/Default/Last Tabs"
+
     "$CHROMIUM_BIN" --headless \
         --remote-debugging-port="$CHROMIUM_PORT" \
         --no-sandbox --disable-setuid-sandbox \
@@ -169,6 +176,7 @@ if [ -n "$CHROMIUM_BIN" ]; then
         --disk-cache-size=0 --disable-cache --aggressive-cache-discard \
         --user-agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36" \
         --user-data-dir="$PROJECT_DIR/whatsapp-auth/db" \
+        "https://web.whatsapp.com" \
         >/dev/null 2>&1 &
     CHROMIUM_PID=$!
     sleep 1
@@ -187,17 +195,20 @@ if [ -f "$PROJECT_DIR/sync_memories.py" ]; then
     timeout 90 python3 "$PROJECT_DIR/sync_memories.py" 2>&1 | sed 's/^/    /' || echo "    ⚠ sync_memories expiró o falló (no crítico)"
 fi
 
-# --- 4. Docker + Obscura ---
+# --- 3. Docker + Obscura ---
 docker rm -f simbad_run 2>/dev/null || true
+mkdir -p "$PROJECT_DIR/media"
 docker run -d --rm --network=host --name simbad_run \
     -e CHROMIUM_CDP_URL="$CHROMIUM_CDP_URL" \
     -v "$PROJECT_DIR/db:/app/db" \
+    -v "$PROJECT_DIR/media:/app/media" \
     -v "$PROJECT_DIR/simbad_mcp.py:/app/simbad_mcp.py" \
+    -v "$PROJECT_DIR/linkedin_chats.py:/app/linkedin_chats.py" \
     simbad >/dev/null 2>&1
 
 wait_for_port "$OBSCURA_PORT" "Obscura"
 
-# --- 5. MCP SSE Server ---
+# --- 4. MCP SSE Server ---
 echo "  Starting MCP SSE server..."
 docker exec -d simbad_run python /app/simbad_mcp.py \
     --transport sse --host 127.0.0.1 --port "$MCP_PORT"
