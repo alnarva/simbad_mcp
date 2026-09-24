@@ -6,3 +6,10 @@ __pycache__/
 *.pyc
 *.pyo
 obscura_src/
+
+# Estado local, binarios y datos privados (no versionar)
+*.db
+*.db-wal
+*.db-shm
+bin/
+media/
